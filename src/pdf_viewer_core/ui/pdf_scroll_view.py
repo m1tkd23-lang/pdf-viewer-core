@@ -15,8 +15,8 @@ from pdf_viewer_core.ui.page_rotation import rotated_size
 @dataclass(frozen=True)
 class Hit:
     page_index: int
-    rects: list[tuple[float, float, float, float]]  # (l, t, r, b)
-    snippets: list[str]  # rects と同じ長さ
+    rects: list[tuple[float, float, float, float]]  # (l, t, r, b) PDF座標
+    snippets: list[str]
     active_rect: int = 0
 
 
@@ -46,7 +46,6 @@ class PdfScrollView(QScrollArea):
         self._hit_cursor: int = -1
         self._last_query: str | None = None
 
-        # Ctrl+Wheel でズーム
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
@@ -94,9 +93,6 @@ class PdfScrollView(QScrollArea):
     # ---- Search (Public API) ----
 
     def get_search_results(self) -> list[SearchResult]:
-        """
-        現在の last_query に対する結果一覧を返す（ページ番号+抜粋用）
-        """
         out: list[SearchResult] = []
         for h in self._hits:
             for j, snip in enumerate(h.snippets):
@@ -104,9 +100,6 @@ class PdfScrollView(QScrollArea):
         return out
 
     def goto_result(self, page_index: int, rect_index: int) -> bool:
-        """
-        指定した (page_index, rect_index) のヒットへ移動
-        """
         if not self._hits:
             return False
 
@@ -115,7 +108,6 @@ class PdfScrollView(QScrollArea):
             if h.page_index == page_index:
                 hit_pos = k
                 break
-
         if hit_pos < 0:
             return False
 
@@ -125,19 +117,11 @@ class PdfScrollView(QScrollArea):
 
         rect_index = max(0, min(rect_index, len(h.rects) - 1))
         self._hit_cursor = hit_pos
-        self._hits[hit_pos] = Hit(
-            page_index=h.page_index,
-            rects=h.rects,
-            snippets=h.snippets,
-            active_rect=rect_index,
-        )
+        self._hits[hit_pos] = Hit(h.page_index, h.rects, h.snippets, active_rect=rect_index)
         self._apply_hit(self._hits[hit_pos])
         return True
 
     def get_search_status(self) -> tuple[int, int, int] | None:
-        """
-        Returns (current_index_1based, total_hits, current_page_1based)
-        """
         if not self._hits or self._hit_cursor < 0:
             return None
 
@@ -171,7 +155,6 @@ class PdfScrollView(QScrollArea):
         if not self._hits:
             return False
 
-        # 初回
         if self._hit_cursor == -1:
             self._hit_cursor = 0
             h0 = self._hits[0]
@@ -185,7 +168,6 @@ class PdfScrollView(QScrollArea):
             self._apply_hit(self._hits[self._hit_cursor])
             return True
 
-        # 次ページへ
         if self._hit_cursor < len(self._hits) - 1:
             self._hit_cursor += 1
             h2 = self._hits[self._hit_cursor]
@@ -193,7 +175,6 @@ class PdfScrollView(QScrollArea):
             self._apply_hit(self._hits[self._hit_cursor])
             return True
 
-        # 末尾で止める
         self._apply_hit(self._hits[self._hit_cursor])
         return True
 
@@ -212,7 +193,6 @@ class PdfScrollView(QScrollArea):
         if not self._hits:
             return False
 
-        # 初回（prev押下時は最後へ）
         if self._hit_cursor == -1:
             self._hit_cursor = len(self._hits) - 1
             hit = self._hits[self._hit_cursor]
@@ -227,7 +207,6 @@ class PdfScrollView(QScrollArea):
             self._apply_hit(self._hits[self._hit_cursor])
             return True
 
-        # 前ページへ
         if self._hit_cursor > 0:
             self._hit_cursor -= 1
             hit2 = self._hits[self._hit_cursor]
@@ -236,7 +215,6 @@ class PdfScrollView(QScrollArea):
             self._apply_hit(self._hits[self._hit_cursor])
             return True
 
-        # 先頭で止める
         self._apply_hit(self._hits[self._hit_cursor])
         return True
 
@@ -264,7 +242,6 @@ class PdfScrollView(QScrollArea):
             except Exception:
                 continue
 
-            # 出現位置を拾う（単純な完全一致）
             starts: list[int] = []
             pos = 0
             while True:
@@ -283,18 +260,16 @@ class PdfScrollView(QScrollArea):
             for s in starts:
                 e = min(n, s + len(q))
 
-                # snippet（前後20文字、改行は空白に）
                 left = max(0, s - 20)
                 right = min(len(full), e + 20)
                 snip = full[left:right].replace("\r", " ").replace("\n", " ")
-                snip = " ".join(snip.split())  # 連続空白を詰める
+                snip = " ".join(snip.split())
                 if left > 0:
                     snip = "..." + snip
                 if right < len(full):
                     snip = snip + "..."
                 snippets.append(f"p{i+1}: {snip}")
 
-                # 文字 bbox を union して “その語” を囲う（行帯っぽくしたいなら pad を増やす）
                 char_rects: list[tuple[float, float, float, float]] = []
                 for ci in range(s, e):
                     try:
@@ -316,14 +291,11 @@ class PdfScrollView(QScrollArea):
                     t2 = max(b, t)
                     if r2 <= l2 or t2 <= b2:
                         continue
-
                     char_rects.append((l2, t2, r2, b2))
 
                 if not char_rects:
-                    # テキストはあるがbboxが取れないケースはスキップ
                     continue
 
-                # 代表高さ（中央値）→見やすさ用余白に使う
                 heights = sorted((t - b) for (_, t, _, b) in char_rects if t > b)
                 h_med = heights[len(heights) // 2] if heights else 1.0
 
@@ -334,13 +306,9 @@ class PdfScrollView(QScrollArea):
 
                 pad_x = h_med * 0.20
                 pad_y = h_med * 0.30
-
                 rects.append((lmin - pad_x, tmax + pad_y, rmax + pad_x, bmin - pad_y))
 
             if rects:
-                # rects/snippets は 1:1 なので長さを合わせる
-                # bboxが取れずcontinueした分だけ snippets が先行している場合があるため、同期を取る
-                # （bbox無しのsnippetは落とす）
                 if len(snippets) != len(rects):
                     snippets = snippets[: len(rects)]
                 self._hits.append(Hit(page_index=i, rects=rects, snippets=snippets, active_rect=0))
@@ -353,64 +321,73 @@ class PdfScrollView(QScrollArea):
                 w.set_active_match(False)
 
     def _apply_hit(self, hit: Hit) -> None:
-        # 対象ページだけハイライト、それ以外は消す
+        """
+        回転後でも「ヒット中心が viewport の中央に来る」ように縦横スクロールを両方合わせる。
+        """
         for i in range(self._layout.count()):
             w = self._layout.itemAt(i).widget()
-            if isinstance(w, PageWidget):
-                is_target = (w.page_index == hit.page_index)
-                w.set_active_match(is_target)
+            if not isinstance(w, PageWidget):
+                continue
 
-                if is_target:
-                    w.set_highlight_rects(hit.rects)
+            is_target = (w.page_index == hit.page_index)
+            w.set_active_match(is_target)
 
-                    # --- ヒット帯の中心を画面中央へ ---
-                    if hit.rects:
-                        l, t, r, b = hit.rects[min(hit.active_rect, len(hit.rects) - 1)]
-                        y_pdf_center = (t + b) * 0.5
+            if not is_target:
+                w.set_highlight_rects([])
+                continue
 
-                        # PageWidget内のローカルy（画像座標系）
-                        y_local = w.pdf_y_to_local_y(y_pdf_center)
+            w.set_highlight_rects(hit.rects)
 
-                        viewport_h = self.viewport().height()
-                        target_in_widget = int(y_local - viewport_h * 0.5)
+            if not hit.rects:
+                self.ensureWidgetVisible(w, xMargin=0, yMargin=40)
+                continue
 
-                        y_in_container = w.y() + target_in_widget
+            l, t, r, b = hit.rects[min(hit.active_rect, len(hit.rects) - 1)]
+            x_pdf_center = (l + r) * 0.5
+            y_pdf_center = (t + b) * 0.5
 
-                        sb = self.verticalScrollBar()
-                        sb.setValue(max(sb.minimum(), min(sb.maximum(), y_in_container)))
-                    else:
-                        self.ensureWidgetVisible(w, xMargin=0, yMargin=40)
-                else:
-                    w.set_highlight_rects([])
+            p_local = w.pdf_point_to_local(x_pdf_center, y_pdf_center)
 
+            vp = self.viewport()
+            vp_w = vp.width()
+            vp_h = vp.height()
+
+            off = w.pixmap_offset_in_widget()
+
+            x_in_container = int(w.x() + off.x() + p_local.x() - vp_w * 0.5)
+            y_in_container = int(w.y() + off.y() + p_local.y() - vp_h * 0.5)
+
+            hsb = self.horizontalScrollBar()
+            vsb = self.verticalScrollBar()
+
+            hsb.setValue(max(hsb.minimum(), min(hsb.maximum(), x_in_container)))
+            vsb.setValue(max(vsb.minimum(), min(vsb.maximum(), y_in_container)))
 
     # ---- Rotation ----
     # ※ユーザー操作として「回転方向が逆」に感じるため、ここで入れ替える
 
     def rotate_cw(self) -> None:
-        # 以前: w.set_rotation_cw()
-        for i in range(self._layout.count()):
-            w = self._layout.itemAt(i).widget()
-            if isinstance(w, PageWidget):
-                w.set_rotation_ccw()
-
-    def rotate_ccw(self) -> None:
-        # 以前: w.set_rotation_ccw()
         for i in range(self._layout.count()):
             w = self._layout.itemAt(i).widget()
             if isinstance(w, PageWidget):
                 w.set_rotation_cw()
 
+
+    def rotate_ccw(self) -> None:
+        for i in range(self._layout.count()):
+            w = self._layout.itemAt(i).widget()
+            if isinstance(w, PageWidget):
+                w.set_rotation_ccw()
+
+
     # ---- Zoom presets ----
 
     def zoom_100(self) -> None:
-        """アプリ内定義の 100%（zoom=1.0）へ戻す"""
         self._zoom = 1.0
         for i in range(self._layout.count()):
             w = self._layout.itemAt(i).widget()
             if isinstance(w, PageWidget):
                 w.set_zoom(self._zoom)
-
 
     def zoom_fit_page(self) -> None:
         vp = self.viewport()
@@ -430,12 +407,10 @@ class PdfScrollView(QScrollArea):
         if not pw_pt or not ph_pt:
             return
 
-        # 90/270なら縦横入れ替え
         rot = page_w.rotation_deg()
-        # “pt”をそのまま rotated_size に通してOK（比率なので）
         w_pt2, h_pt2 = rotated_size(int(pw_pt), int(ph_pt), rot)
 
-        base_scale = 2.0  # PageWidget側の scale = zoom * 2.0 前提
+        base_scale = 2.0
         z_w = vp_w / (float(w_pt2) * base_scale)
         z_h = vp_h / (float(h_pt2) * base_scale)
         z = min(z_w, z_h)
@@ -447,7 +422,6 @@ class PdfScrollView(QScrollArea):
             w = self._layout.itemAt(i).widget()
             if isinstance(w, PageWidget):
                 w.set_zoom(self._zoom)
-
 
     def get_zoom_percent(self) -> int:
         return int(round(self._zoom * 100))
