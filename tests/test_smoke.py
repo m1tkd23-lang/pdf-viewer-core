@@ -4,8 +4,12 @@
 importできること、および main() が呼べることだけを確認する。
 """
 
-def test_import():
+def test_import_core():
     import pdf_viewer_core.core  # noqa: F401
+
+def test_import_ui():
+    import pdf_viewer_core.ui.main_window  # noqa: F401
+
 
 
 def test_main_runs(capsys):

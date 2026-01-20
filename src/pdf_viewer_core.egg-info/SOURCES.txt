@@ -1,0 +1,15 @@
+README.md
+pyproject.toml
+src/pdf_viewer_core/__init__.py
+src/pdf_viewer_core/core.py
+src/pdf_viewer_core.egg-info/PKG-INFO
+src/pdf_viewer_core.egg-info/SOURCES.txt
+src/pdf_viewer_core.egg-info/dependency_links.txt
+src/pdf_viewer_core.egg-info/top_level.txt
+src/pdf_viewer_core/services/__init__.py
+src/pdf_viewer_core/services/recent_files.py
+src/pdf_viewer_core/ui/__init__.py
+src/pdf_viewer_core/ui/main_window.py
+src/pdf_viewer_core/ui/page_widget.py
+src/pdf_viewer_core/ui/pdf_scroll_view.py
+tests/test_smoke.py
