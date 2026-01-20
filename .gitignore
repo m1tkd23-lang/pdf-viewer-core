@@ -16,7 +16,15 @@ __pycache__/
 # build artifacts
 dist/
 build/
-*.exe
+
+
+# PyInstaller
+*.spec~
+*.manifest
+
+
+# pytest
+.pytest_cache/
 
 
 # logs

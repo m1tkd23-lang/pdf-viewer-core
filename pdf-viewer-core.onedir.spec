@@ -3,8 +3,6 @@
 import os
 from pathlib import Path
 
-# PyInstaller が spec を exec() で評価する際、環境によって __file__ が定義されないことがある。
-# そのため、実行時カレントディレクトリをリポジトリルートとして扱う。
 ROOT = Path(os.getcwd()).resolve()
 SRC = ROOT / "src"
 
@@ -14,9 +12,7 @@ a = Analysis(
     ["apps/main.py"],
     pathex=[str(ROOT), str(SRC)],
     binaries=[],
-    datas=[
-        # (str(ROOT / ".env.example"), "."),
-    ],
+    datas=[],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -42,14 +38,13 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,  # GUI化するなら False
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
 )
-
 
 coll = COLLECT(
     exe,
@@ -60,5 +55,3 @@ coll = COLLECT(
     upx=True,
     name="pdf-viewer-core",
 )
-
-# onedir配布を安定化したい場合は、後で COLLECT を追加する（まずはビルドを通す）

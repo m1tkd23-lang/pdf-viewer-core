@@ -216,3 +216,50 @@ pyinstaller .\pdf-viewer-core.spec
 - 200行を超えてきた
 
 → その時点で `src/pdf_viewer_core/` または `ui/` に移す。
+
+
+## PyInstaller 運用（採用）
+
+このリポジトリでは **.spec を正（Single Source of Truth）** とします。
+
+- onefile：配布が簡単（exe 1本）
+- onedir：壊れにくい（フォルダ配布、DLLやデータ同梱が安定）
+
+### ビルド（onefile）
+
+```powershell
+pyinstaller .\pdf-viewer-core.onefile.spec
+生成物：
+
+dist\pdf-viewer-core.exe
+
+ビルド（onedir）
+powershell
+コードをコピーする
+pyinstaller .\pdf-viewer-core.onedir.spec
+生成物：
+
+dist\pdf-viewer-core\pdf-viewer-core.exe
+
+yaml
+コードをコピーする
+
+---
+
+## 4) いま削除/変更して良いもの（テンプレ整理）
+
+### ✅ 変更
+- `pdf-viewer-core.spec` → `pdf-viewer-core.onefile.spec` にリネーム  
+  （テンプレとして意図が明確になる）
+
+### ✅ 削除候補（テンプレとしては消して良い）
+- `memo.md`（前に言った通り。残すなら docs/ にテンプレ化して移動）
+
+---
+
+## 5) 仕上げの動作チェック（onedir）
+リネーム＆追加後にこれを実行：
+
+```powershell
+pyinstaller .\pdf-viewer-core.onedir.spec
+.\dist\pdf-viewer-core\pdf-viewer-core.exe
