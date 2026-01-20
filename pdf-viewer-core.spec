@@ -15,7 +15,8 @@ a = Analysis(
     pathex=[str(ROOT), str(SRC)],
     binaries=[],
     datas=[
-        # (str(ROOT / ".env.example"), "."),
+        # 必要になったら同梱する
+        # (str(ROOT / "README.md"), "."),
     ],
     hiddenimports=[],
     hookspath=[],
@@ -30,6 +31,8 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# ---- onefile ----
+# COLLECT を使わず EXE だけで完結させる（dist に pdf-viewer-core.exe が出る）
 exe = EXE(
     pyz,
     a.scripts,
@@ -42,23 +45,10 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,  # GUI化するなら False
+    console=False,  # rev1.0 GUI配布（デバッグしたい場合は True）
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
 )
-
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    strip=False,
-    upx=True,
-    name="pdf-viewer-core",
-)
-
-# onedir配布を安定化したい場合は、後で COLLECT を追加する（まずはビルドを通す）

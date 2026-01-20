@@ -16,9 +16,12 @@ py -3.12 -m venv .venv
 
 .\.venv\Scripts\Activate.ps1
 
-python .\apps\main.py
+### 開発実行
 
+python -m apps.main
 
+### exe化
+pyinstaller pdf-viewer-core.spec --clean
 
 
 ### AI（設計補助・実装支援）への運用ルール 

@@ -12,6 +12,9 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QToolBar,
     QLabel,
+    QDockWidget,
+    QListWidget,
+    QListWidgetItem,
 )
 
 from pdf_viewer_core.services.recent_files import RecentFiles
@@ -28,10 +31,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self._view)
 
         self._build_toolbar()
+        self._build_results_dock()
         self._build_menus()
 
-        # 起動直後の表示
         self._update_search_status()
+        self._refresh_results_list()
 
         # 起動時に最後のファイルを開く（履歴があれば）
         last = self._recent.get_last()
@@ -55,7 +59,6 @@ class MainWindow(QMainWindow):
         self._search.setPlaceholderText("Search text... (Enter=Next, Shift+Enter=Prev)")
         tb.addWidget(self._search)
 
-        # Enter / Shift+Enter で Next/Prev（検索欄にフォーカスしたまま操作できる）
         self._search.returnPressed.connect(self.on_find_next)
         self._search.installEventFilter(self)
 
@@ -83,17 +86,69 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
+        act_rot_l = QAction("Rotate ⟲", self)
+        act_rot_l.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        act_rot_l.triggered.connect(self._view.rotate_ccw)
+        tb.addAction(act_rot_l)
+
+        act_rot_r = QAction("Rotate ⟳", self)
+        act_rot_r.setShortcut(QKeySequence("Ctrl+R"))
+        act_rot_r.triggered.connect(self._view.rotate_cw)
+        tb.addAction(act_rot_r)
+        tb.addSeparator()
+
+        act_fit = QAction("Fit", self)
+        act_fit.setShortcut(QKeySequence("Ctrl+Shift+F"))
+        act_fit.setStatusTip("Fit page to window (both width & height)")
+        act_fit.triggered.connect(lambda: (self._view.zoom_fit_page(), self._update_zoom_status()))
+        tb.addAction(act_fit)
+
+        act_100 = QAction("100%", self)
+        act_100.setStatusTip("Actual size (app-defined 100%)")
+        act_100.triggered.connect(lambda: (self._view.zoom_100(), self._update_zoom_status()))
+        tb.addAction(act_100)
+
+        tb.addSeparator()
+
+        act_zoomin = QAction("Zoom +", self)
+        act_zoomin.setShortcut(QKeySequence.StandardKey.ZoomIn)
+        act_zoomin.triggered.connect(lambda: (self._view.zoom_by(1.1), self._update_zoom_status()))
+        tb.addAction(act_zoomin)
+
+        act_zoomout = QAction("Zoom -", self)
+        act_zoomout.setShortcut(QKeySequence.StandardKey.ZoomOut)
+        act_zoomout.triggered.connect(lambda: (self._view.zoom_by(1 / 1.1), self._update_zoom_status()))
+        tb.addAction(act_zoomout)
+
+
+
+        tb.addSeparator()
+
         # 検索ステータス（常時表示）
         self._lbl_status = QLabel("0/0", self)
         self._lbl_status.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
         self._lbl_status.setMinimumWidth(140)
         tb.addWidget(self._lbl_status)
 
-        # Ctrl+F で検索欄へ（ブラウザっぽい）
+        # Ctrl+F で検索欄へ
         act_focus_find = QAction("Find", self)
         act_focus_find.setShortcut(QKeySequence.StandardKey.Find)
         act_focus_find.triggered.connect(self._focus_search)
         self.addAction(act_focus_find)
+
+    def _build_results_dock(self) -> None:
+        self._dock = QDockWidget("Results", self)
+        self._dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.LeftDockWidgetArea)
+
+        self._results = QListWidget(self)
+        self._results.itemActivated.connect(self._on_result_activated)  # ダブルクリック/Enter
+        self._results.itemClicked.connect(self._on_result_clicked)
+        self._dock.setWidget(self._results)
+
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._dock)
+
+        # 表示/非表示切り替え（Ctrl+L みたいなショートカットが欲しければ後で付ける）
+        self._dock.setVisible(True)
 
     def _build_menus(self) -> None:
         m_file = self.menuBar().addMenu("File")
@@ -134,6 +189,8 @@ class MainWindow(QMainWindow):
             return
         self.open_pdf(Path(path))
 
+
+
     def open_pdf(self, path: Path) -> None:
         try:
             self._view.load_pdf(path)
@@ -144,8 +201,10 @@ class MainWindow(QMainWindow):
         self._recent.push(str(path))
         self._refresh_recent_menu()
 
-        # PDFを開いたら検索状態をリセット（表示更新）
+        # PDFを開いたら検索状態の表示更新（結果は空になる想定）
         self._update_search_status()
+        self._refresh_results_list()
+        self._view.zoom_fit_page()
 
     def _update_search_status(self) -> None:
         st = self._view.get_search_status() if hasattr(self._view, "get_search_status") else None
@@ -154,6 +213,46 @@ class MainWindow(QMainWindow):
             return
         cur, total, page = st
         self._lbl_status.setText(f"{cur}/{total} (page {page})")
+
+    def _refresh_results_list(self) -> None:
+        """
+        PdfScrollView 側の検索結果（last_query）をリスト表示
+        """
+        self._results.clear()
+
+        if not hasattr(self._view, "get_search_results"):
+            self._results.addItem("(not supported)")
+            self._results.setEnabled(False)
+            return
+
+        results = self._view.get_search_results()
+        if not results:
+            self._results.addItem("(no results)")
+            self._results.setEnabled(False)
+            return
+
+        self._results.setEnabled(True)
+
+        for r in results:
+            item = QListWidgetItem(r.snippet)
+            # page_index / rect_index を埋め込む
+            item.setData(Qt.ItemDataRole.UserRole, (r.page_index, r.rect_index))
+            self._results.addItem(item)
+
+    def _jump_to_item(self, item: QListWidgetItem) -> None:
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        page_index, rect_index = data
+        ok = self._view.goto_result(int(page_index), int(rect_index))
+        if ok:
+            self._update_search_status()
+
+    def _on_result_clicked(self, item: QListWidgetItem) -> None:
+        self._jump_to_item(item)
+
+    def _on_result_activated(self, item: QListWidgetItem) -> None:
+        self._jump_to_item(item)
 
     def _notify_no_matches(self) -> None:
         self.statusBar().showMessage("No matches", 1500)
@@ -166,7 +265,9 @@ class MainWindow(QMainWindow):
         ok = self._view.find_next(q)
         if not ok:
             self._notify_no_matches()
+
         self._update_search_status()
+        self._refresh_results_list()
 
     def on_find_prev(self) -> None:
         q = self._search.text().strip()
@@ -176,7 +277,9 @@ class MainWindow(QMainWindow):
         ok = self._view.find_prev(q)
         if not ok:
             self._notify_no_matches()
+
         self._update_search_status()
+        self._refresh_results_list()
 
     # Shift+Enter を検索欄で拾って Prev にする
     def eventFilter(self, obj, event):
@@ -186,3 +289,6 @@ class MainWindow(QMainWindow):
                     self.on_find_prev()
                     return True
         return super().eventFilter(obj, event)
+
+    def _update_zoom_status(self) -> None:
+        self.statusBar().showMessage(f"Zoom: {self._view.get_zoom_percent()}%", 1500)

@@ -14,8 +14,16 @@ from pdf_viewer_core.ui.page_widget import PageWidget
 @dataclass(frozen=True)
 class Hit:
     page_index: int
-    rects: list[tuple[float, float, float, float]]
+    rects: list[tuple[float, float, float, float]]  # (l, t, r, b)
+    snippets: list[str]  # rects と同じ長さ
     active_rect: int = 0
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    page_index: int
+    rect_index: int
+    snippet: str
 
 
 class PdfScrollView(QScrollArea):
@@ -82,188 +90,70 @@ class PdfScrollView(QScrollArea):
             return
         super().wheelEvent(event)
 
-    # ---- Search ----
+    # ---- Search (Public API) ----
 
-    def _build_hits(self, query: str) -> None:
-        if not self._doc:
-            return
+    def get_search_results(self) -> list[SearchResult]:
+        """
+        現在の last_query に対する結果一覧を返す（ページ番号+抜粋用）
+        """
+        out: list[SearchResult] = []
+        for h in self._hits:
+            for j, snip in enumerate(h.snippets):
+                out.append(SearchResult(page_index=h.page_index, rect_index=j, snippet=snip))
+        return out
 
-        self._hits = []
-        self._hit_cursor = -1
-        self._clear_all_highlights()
+    def goto_result(self, page_index: int, rect_index: int) -> bool:
+        """
+        指定した (page_index, rect_index) のヒットへ移動
+        """
+        if not self._hits:
+            return False
 
-        q = query.strip()
-        if not q:
-            return
+        hit_pos = -1
+        for k, h in enumerate(self._hits):
+            if h.page_index == page_index:
+                hit_pos = k
+                break
 
-        for i in range(len(self._doc)):
-            page = self._doc.get_page(i)
-            textpage = page.get_textpage()
+        if hit_pos < 0:
+            return False
 
-            # 1) ページ全文テキストを取得（char index と対応する前提）
-            try:
-                n = int(textpage.count_chars())
-                full = textpage.get_text_range(0, n) or ""
-            except Exception:
-                continue
+        h = self._hits[hit_pos]
+        if not h.rects:
+            return False
 
-            # 2) 出現位置を全部拾う（ページ内すべてハイライト）
-            starts: list[int] = []
-            pos = 0
-            while True:
-                idx = full.find(q, pos)
-                if idx < 0:
-                    break
-                starts.append(idx)
-                pos = idx + max(1, len(q))
+        rect_index = max(0, min(rect_index, len(h.rects) - 1))
+        self._hit_cursor = hit_pos
+        self._hits[hit_pos] = Hit(
+            page_index=h.page_index,
+            rects=h.rects,
+            snippets=h.snippets,
+            active_rect=rect_index,
+        )
+        self._apply_hit(self._hits[hit_pos])
+        return True
 
-            if not starts:
-                continue
+    def get_search_status(self) -> tuple[int, int, int] | None:
+        """
+        Returns (current_index_1based, total_hits, current_page_1based)
+        """
+        if not self._hits or self._hit_cursor < 0:
+            return None
 
-            # 3) 文字 bbox を取り、行ごとにマージして rects を作る
-            rects: list[tuple[float, float, float, float]] = []
+        total = sum(len(h.rects) for h in self._hits)
+        if total <= 0:
+            return None
 
-            for s in starts:
-                e = min(n, s + len(q))
+        hit = self._hits[self._hit_cursor]
+        active = min(hit.active_rect, max(0, len(hit.rects) - 1))
 
-                # 文字ごとの矩形を集める
-                char_rects: list[tuple[float, float, float, float]] = []
-                for ci in range(s, e):
-                    try:
-                        box = textpage.get_charbox(ci)
-                    except Exception:
-                        continue
+        before = 0
+        for k in range(self._hit_cursor):
+            before += len(self._hits[k].rects)
 
-                    # box が Rect オブジェクト or タプルの両対応
-                    if hasattr(box, "left"):
-                        l = float(box.left)
-                        b = float(getattr(box, "bottom", 0.0))
-                        r = float(box.right)
-                        t = float(getattr(box, "top", 0.0))
-                    else:
-                        # 典型: (left, bottom, right, top)
-                        l, b, r, t = map(float, box)
-
-                    # 座標の上下が逆でも成立するように正規化
-                    l2 = min(l, r)
-                    r2 = max(l, r)
-                    b2 = min(b, t)
-                    t2 = max(b, t)
-
-                    # 無効矩形を弾く（正規化後）
-                    if r2 <= l2 or t2 <= b2:
-                        continue
-
-                    char_rects.append((l2, t2, r2, b2))  # (l, t, r, b)
-
-
-                # 4) 同一行っぽい矩形をまとめて「行の帯」を作る
-                if not char_rects:
-                    continue
-
-                # topの近さで行クラスタリング（yは PDF座標系）
-                # 同一行の判定幅は「代表文字高さ」から算出
-                # char_rects: (l, t, r, b)
-                char_rects.sort(key=lambda x: (-(x[1]), x[0]))  # top降順, x昇順
-
-                # 代表的な文字高さ（中央値）を使って頑健にする
-                heights = sorted((t - b) for (_, t, _, b) in char_rects if t > b)
-                if heights:
-                    h_med = heights[len(heights) // 2]
-                else:
-                    h_med = 1.0
-
-                line_tol = max(1e-3, h_med * 0.7)  # topの許容幅（行判定）
-
-                # 行クラスタを作る
-                lines: list[list[tuple[float, float, float, float]]] = []
-                cur: list[tuple[float, float, float, float]] = [char_rects[0]]
-                cur_top = char_rects[0][1]
-
-                for (l, t, r, b) in char_rects[1:]:
-                    if abs(t - cur_top) <= line_tol:
-                        cur.append((l, t, r, b))
-                        # 行の代表topを少し追随させる（ドリフト抑制）
-                        cur_top = (cur_top * 0.8) + (t * 0.2)
-                    else:
-                        lines.append(cur)
-                        cur = [(l, t, r, b)]
-                        cur_top = t
-                lines.append(cur)
-
-                # 行ごとに帯(rect)を作る：Xはその行内の検索語範囲、Yは行高
-                for line in lines:
-                    lmin = min(x[0] for x in line)
-                    tmax = max(x[1] for x in line)
-                    rmax = max(x[2] for x in line)
-                    bmin = min(x[3] for x in line)
-
-                    # 見やすさ用の余白（PDF座標系で加える）
-                    pad_x = h_med * 0.15
-                    pad_y = h_med * 0.25
-
-                    rects.append((
-                        lmin - pad_x,
-                        tmax + pad_y,
-                        rmax + pad_x,
-                        bmin - pad_y,
-                    ))
-
-            if rects:
-                self._hits.append(Hit(page_index=i, rects=rects))
-
-
-    def _clear_all_highlights(self) -> None:
-        for i in range(self._layout.count()):
-            w = self._layout.itemAt(i).widget()
-            if isinstance(w, PageWidget):
-                w.set_highlight_rects([])
-
-    def _apply_hit(self, hit: Hit) -> None:
-        # まず全ページの表示状態を更新（ターゲット以外は消す）
-        target_widget: PageWidget | None = None
-
-        for i in range(self._layout.count()):
-            w = self._layout.itemAt(i).widget()
-            if not isinstance(w, PageWidget):
-                continue
-
-            is_target = (w.page_index == hit.page_index)
-            w.set_active_match(is_target)
-
-            if is_target:
-                w.set_highlight_rects(hit.rects)
-                target_widget = w
-            else:
-                w.set_highlight_rects([])
-
-        # ターゲットページが無い / rectが無い場合は従来通り
-        if not target_widget or not hit.rects:
-            if target_widget:
-                self.ensureWidgetVisible(target_widget, xMargin=0, yMargin=40)
-            return
-
-        # ---- 中央スクロール（ターゲットページのみ）----
-        w = target_widget
-        l, t, r, b = hit.rects[min(hit.active_rect, len(hit.rects) - 1)]
-
-        # PDF座標での中心y
-        y_pdf_center = (t + b) * 0.5
-
-        # PageWidget内のローカルy（画像座標系）
-        y_local = w.pdf_y_to_local_y(y_pdf_center)
-
-        # ScrollAreaのビューポート中央に合わせる
-        viewport_h = self.viewport().height()
-        target_in_widget = int(y_local - viewport_h * 0.5)
-
-        # PageWidgetのScrollArea内での位置（widget上端のオフセット）
-        y_in_container = w.y() + target_in_widget
-
-        sb = self.verticalScrollBar()
-        sb.setValue(max(sb.minimum(), min(sb.maximum(), y_in_container)))
-
-
+        current_1based = before + active + 1
+        page_1based = hit.page_index + 1
+        return (current_1based, total, page_1based)
 
     def find_next(self, query: str) -> bool:
         if not self._doc:
@@ -283,29 +173,28 @@ class PdfScrollView(QScrollArea):
         # 初回
         if self._hit_cursor == -1:
             self._hit_cursor = 0
-            self._hits[0] = Hit(self._hits[0].page_index, self._hits[0].rects, active_rect=0)
+            h0 = self._hits[0]
+            self._hits[0] = Hit(h0.page_index, h0.rects, h0.snippets, active_rect=0)
             self._apply_hit(self._hits[0])
             return True
 
         hit = self._hits[self._hit_cursor]
         if hit.rects and hit.active_rect < len(hit.rects) - 1:
-            # 同ページ内で次のrectへ
-            self._hits[self._hit_cursor] = Hit(hit.page_index, hit.rects, active_rect=hit.active_rect + 1)
+            self._hits[self._hit_cursor] = Hit(hit.page_index, hit.rects, hit.snippets, active_rect=hit.active_rect + 1)
             self._apply_hit(self._hits[self._hit_cursor])
             return True
 
         # 次ページへ
         if self._hit_cursor < len(self._hits) - 1:
             self._hit_cursor += 1
-            hit2 = self._hits[self._hit_cursor]
-            self._hits[self._hit_cursor] = Hit(hit2.page_index, hit2.rects, active_rect=0)
+            h2 = self._hits[self._hit_cursor]
+            self._hits[self._hit_cursor] = Hit(h2.page_index, h2.rects, h2.snippets, active_rect=0)
             self._apply_hit(self._hits[self._hit_cursor])
             return True
 
-        # 最後まで行ったら末尾で止める（循環させたいならここを変える）
+        # 末尾で止める
         self._apply_hit(self._hits[self._hit_cursor])
         return True
-
 
     def find_prev(self, query: str) -> bool:
         if not self._doc:
@@ -327,14 +216,13 @@ class PdfScrollView(QScrollArea):
             self._hit_cursor = len(self._hits) - 1
             hit = self._hits[self._hit_cursor]
             last_idx = max(0, len(hit.rects) - 1)
-            self._hits[self._hit_cursor] = Hit(hit.page_index, hit.rects, active_rect=last_idx)
+            self._hits[self._hit_cursor] = Hit(hit.page_index, hit.rects, hit.snippets, active_rect=last_idx)
             self._apply_hit(self._hits[self._hit_cursor])
             return True
 
         hit = self._hits[self._hit_cursor]
         if hit.rects and hit.active_rect > 0:
-            # 同ページ内で前のrectへ
-            self._hits[self._hit_cursor] = Hit(hit.page_index, hit.rects, active_rect=hit.active_rect - 1)
+            self._hits[self._hit_cursor] = Hit(hit.page_index, hit.rects, hit.snippets, active_rect=hit.active_rect - 1)
             self._apply_hit(self._hits[self._hit_cursor])
             return True
 
@@ -343,36 +231,230 @@ class PdfScrollView(QScrollArea):
             self._hit_cursor -= 1
             hit2 = self._hits[self._hit_cursor]
             last_idx = max(0, len(hit2.rects) - 1)
-            self._hits[self._hit_cursor] = Hit(hit2.page_index, hit2.rects, active_rect=last_idx)
+            self._hits[self._hit_cursor] = Hit(hit2.page_index, hit2.rects, hit2.snippets, active_rect=last_idx)
             self._apply_hit(self._hits[self._hit_cursor])
             return True
 
-        # 先頭まで行ったら先頭で止める
+        # 先頭で止める
         self._apply_hit(self._hits[self._hit_cursor])
         return True
 
+    # ---- Search (Internal) ----
 
-    def get_search_status(self) -> tuple[int, int, int] | None:
+    def _build_hits(self, query: str) -> None:
+        if not self._doc:
+            return
+
+        self._hits = []
+        self._hit_cursor = -1
+        self._clear_all_highlights()
+
+        q = query.strip()
+        if not q:
+            return
+
+        for i in range(len(self._doc)):
+            page = self._doc.get_page(i)
+            textpage = page.get_textpage()
+
+            try:
+                n = int(textpage.count_chars())
+                full = textpage.get_text_range(0, n) or ""
+            except Exception:
+                continue
+
+            # 出現位置を拾う（単純な完全一致）
+            starts: list[int] = []
+            pos = 0
+            while True:
+                idx = full.find(q, pos)
+                if idx < 0:
+                    break
+                starts.append(idx)
+                pos = idx + max(1, len(q))
+
+            if not starts:
+                continue
+
+            rects: list[tuple[float, float, float, float]] = []
+            snippets: list[str] = []
+
+            for s in starts:
+                e = min(n, s + len(q))
+
+                # snippet（前後20文字、改行は空白に）
+                left = max(0, s - 20)
+                right = min(len(full), e + 20)
+                snip = full[left:right].replace("\r", " ").replace("\n", " ")
+                snip = " ".join(snip.split())  # 連続空白を詰める
+                if left > 0:
+                    snip = "..." + snip
+                if right < len(full):
+                    snip = snip + "..."
+                snippets.append(f"p{i+1}: {snip}")
+
+                # 文字 bbox を union して “その語” を囲う（行帯っぽくしたいなら pad を増やす）
+                char_rects: list[tuple[float, float, float, float]] = []
+                for ci in range(s, e):
+                    try:
+                        box = textpage.get_charbox(ci)
+                    except Exception:
+                        continue
+
+                    if hasattr(box, "left"):
+                        l = float(box.left)
+                        b = float(getattr(box, "bottom", 0.0))
+                        r = float(box.right)
+                        t = float(getattr(box, "top", 0.0))
+                    else:
+                        l, b, r, t = map(float, box)
+
+                    l2 = min(l, r)
+                    r2 = max(l, r)
+                    b2 = min(b, t)
+                    t2 = max(b, t)
+                    if r2 <= l2 or t2 <= b2:
+                        continue
+
+                    char_rects.append((l2, t2, r2, b2))
+
+                if not char_rects:
+                    # テキストはあるがbboxが取れないケースはスキップ
+                    continue
+
+                # 代表高さ（中央値）→見やすさ用余白に使う
+                heights = sorted((t - b) for (_, t, _, b) in char_rects if t > b)
+                h_med = heights[len(heights) // 2] if heights else 1.0
+
+                lmin = min(x[0] for x in char_rects)
+                tmax = max(x[1] for x in char_rects)
+                rmax = max(x[2] for x in char_rects)
+                bmin = min(x[3] for x in char_rects)
+
+                pad_x = h_med * 0.20
+                pad_y = h_med * 0.30
+
+                rects.append((lmin - pad_x, tmax + pad_y, rmax + pad_x, bmin - pad_y))
+
+            if rects:
+                # rects/snippets は 1:1 なので長さを合わせる
+                # bboxが取れずcontinueした分だけ snippets が先行している場合があるため、同期を取る
+                # （bbox無しのsnippetは落とす）
+                if len(snippets) != len(rects):
+                    snippets = snippets[: len(rects)]
+                self._hits.append(Hit(page_index=i, rects=rects, snippets=snippets, active_rect=0))
+
+    def _clear_all_highlights(self) -> None:
+        for i in range(self._layout.count()):
+            w = self._layout.itemAt(i).widget()
+            if isinstance(w, PageWidget):
+                w.set_highlight_rects([])
+                w.set_active_match(False)
+
+    def _apply_hit(self, hit: Hit) -> None:
+        # 対象ページだけハイライト、それ以外は消す
+        for i in range(self._layout.count()):
+            w = self._layout.itemAt(i).widget()
+            if isinstance(w, PageWidget):
+                is_target = (w.page_index == hit.page_index)
+                w.set_active_match(is_target)
+
+                if is_target:
+                    w.set_highlight_rects(hit.rects)
+
+                    # --- ヒット帯の中心を画面中央へ ---
+                    if hit.rects:
+                        l, t, r, b = hit.rects[min(hit.active_rect, len(hit.rects) - 1)]
+                        y_pdf_center = (t + b) * 0.5
+
+                        # PageWidget内のローカルy（画像座標系）
+                        y_local = w.pdf_y_to_local_y(y_pdf_center)
+
+                        viewport_h = self.viewport().height()
+                        target_in_widget = int(y_local - viewport_h * 0.5)
+
+                        y_in_container = w.y() + target_in_widget
+
+                        sb = self.verticalScrollBar()
+                        sb.setValue(max(sb.minimum(), min(sb.maximum(), y_in_container)))
+                    else:
+                        self.ensureWidgetVisible(w, xMargin=0, yMargin=40)
+                else:
+                    w.set_highlight_rects([])
+
+
+    # ---- Rotation ----
+    # ※ユーザー操作として「回転方向が逆」に感じるため、ここで入れ替える
+
+    def rotate_cw(self) -> None:
+        # 以前: w.set_rotation_cw()
+        for i in range(self._layout.count()):
+            w = self._layout.itemAt(i).widget()
+            if isinstance(w, PageWidget):
+                w.set_rotation_ccw()
+
+    def rotate_ccw(self) -> None:
+        # 以前: w.set_rotation_ccw()
+        for i in range(self._layout.count()):
+            w = self._layout.itemAt(i).widget()
+            if isinstance(w, PageWidget):
+                w.set_rotation_cw()
+
+
+                w.set_rotation_cw()
+    # ---- Zoom presets ----
+
+    def zoom_100(self) -> None:
+        """アプリ内定義の 100%（zoom=1.0）へ戻す"""
+        self._zoom = 1.0
+        for i in range(self._layout.count()):
+            w = self._layout.itemAt(i).widget()
+            if isinstance(w, PageWidget):
+                w.set_zoom(self._zoom)
+
+    def zoom_fit_page(self) -> None:
         """
-        Returns (current_index_1based, total_hits, current_page_1based)
-        何もヒットしていなければ None
+        縦横どちらも収まる倍率（min）へ。
+        いったん「先頭ページ」を基準にする（軽量＆安定）。
         """
-        if not self._hits or self._hit_cursor < 0:
-            return None
+        # viewport サイズ（スクロールバー等を除いた表示領域）
+        vp = self.viewport()
+        vp_w = max(1, vp.width())
+        vp_h = max(1, vp.height())
 
-        # 総ヒット数（rect総数）
-        total = sum(len(h.rects) for h in self._hits)
-        if total <= 0:
-            return None
+        # レイアウト内の最初の PageWidget を拾う
+        page_w: PageWidget | None = None
+        for i in range(self._layout.count()):
+            w = self._layout.itemAt(i).widget()
+            if isinstance(w, PageWidget):
+                page_w = w
+                break
+        if page_w is None:
+            return
 
-        hit = self._hits[self._hit_cursor]
-        active = min(hit.active_rect, max(0, len(hit.rects) - 1))
+        # PageWidget は pt のサイズを内部に持っているのでそれを使う
+        # （PageWidget 側に getter を生やすのが一番綺麗）
+        pw_pt, ph_pt = page_w.page_size_pt()
+        if not pw_pt or not ph_pt:
+            return
 
-        # 先頭からの通し番号を作る
-        before = 0
-        for k in range(self._hit_cursor):
-            before += len(self._hits[k].rects)
+        # PageWidget._render() の scale = zoom * 2.0 前提
+        base_scale = 2.0
 
-        current_1based = before + active + 1
-        page_1based = hit.page_index + 1
-        return (current_1based, total, page_1based)
+        # “ページ画像(px)” は概ね page_pt * (zoom*2.0)
+        # なので zoom = vp / (page_pt*2.0)
+        z_w = vp_w / (float(pw_pt) * base_scale)
+        z_h = vp_h / (float(ph_pt) * base_scale)
+        z = min(z_w, z_h)
+
+        # 安全範囲
+        z = max(0.2, min(5.0, z))
+
+        self._zoom = z
+        for i in range(self._layout.count()):
+            w = self._layout.itemAt(i).widget()
+            if isinstance(w, PageWidget):
+                w.set_zoom(self._zoom)
+
+    def get_zoom_percent(self) -> int:
+        return int(round(self._zoom * 100))
