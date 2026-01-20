@@ -9,6 +9,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QScrollArea, QVBoxLayout, QWidget
 
 from pdf_viewer_core.ui.page_widget import PageWidget
+from pdf_viewer_core.ui.page_rotation import rotated_size
 
 
 @dataclass(frozen=True)
@@ -400,8 +401,6 @@ class PdfScrollView(QScrollArea):
             if isinstance(w, PageWidget):
                 w.set_rotation_cw()
 
-
-                w.set_rotation_cw()
     # ---- Zoom presets ----
 
     def zoom_100(self) -> None:
@@ -412,17 +411,12 @@ class PdfScrollView(QScrollArea):
             if isinstance(w, PageWidget):
                 w.set_zoom(self._zoom)
 
+
     def zoom_fit_page(self) -> None:
-        """
-        縦横どちらも収まる倍率（min）へ。
-        いったん「先頭ページ」を基準にする（軽量＆安定）。
-        """
-        # viewport サイズ（スクロールバー等を除いた表示領域）
         vp = self.viewport()
         vp_w = max(1, vp.width())
         vp_h = max(1, vp.height())
 
-        # レイアウト内の最初の PageWidget を拾う
         page_w: PageWidget | None = None
         for i in range(self._layout.count()):
             w = self._layout.itemAt(i).widget()
@@ -432,29 +426,28 @@ class PdfScrollView(QScrollArea):
         if page_w is None:
             return
 
-        # PageWidget は pt のサイズを内部に持っているのでそれを使う
-        # （PageWidget 側に getter を生やすのが一番綺麗）
         pw_pt, ph_pt = page_w.page_size_pt()
         if not pw_pt or not ph_pt:
             return
 
-        # PageWidget._render() の scale = zoom * 2.0 前提
-        base_scale = 2.0
+        # 90/270なら縦横入れ替え
+        rot = page_w.rotation_deg()
+        # “pt”をそのまま rotated_size に通してOK（比率なので）
+        w_pt2, h_pt2 = rotated_size(int(pw_pt), int(ph_pt), rot)
 
-        # “ページ画像(px)” は概ね page_pt * (zoom*2.0)
-        # なので zoom = vp / (page_pt*2.0)
-        z_w = vp_w / (float(pw_pt) * base_scale)
-        z_h = vp_h / (float(ph_pt) * base_scale)
+        base_scale = 2.0  # PageWidget側の scale = zoom * 2.0 前提
+        z_w = vp_w / (float(w_pt2) * base_scale)
+        z_h = vp_h / (float(h_pt2) * base_scale)
         z = min(z_w, z_h)
 
-        # 安全範囲
         z = max(0.2, min(5.0, z))
-
         self._zoom = z
+
         for i in range(self._layout.count()):
             w = self._layout.itemAt(i).widget()
             if isinstance(w, PageWidget):
                 w.set_zoom(self._zoom)
+
 
     def get_zoom_percent(self) -> int:
         return int(round(self._zoom * 100))

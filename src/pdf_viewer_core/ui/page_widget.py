@@ -184,3 +184,7 @@ class PageWidget(QWidget):
         py1 = y0 * img_h
 
         return QRectF(px0, py0, max(1.0, px1 - px0), max(1.0, py1 - py0))
+    
+    
+    def rotation_deg(self) -> int:
+        return self._rotation.normalized()
