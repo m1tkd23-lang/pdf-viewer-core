@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QToolBar,
+    QLabel,
 )
 
 from pdf_viewer_core.services.recent_files import RecentFiles
@@ -28,6 +29,9 @@ class MainWindow(QMainWindow):
 
         self._build_toolbar()
         self._build_menus()
+
+        # 起動直後の表示
+        self._update_search_status()
 
         # 起動時に最後のファイルを開く（履歴があれば）
         last = self._recent.get_last()
@@ -48,9 +52,12 @@ class MainWindow(QMainWindow):
 
         # 検索ボックス
         self._search = QLineEdit(self)
-        self._search.setPlaceholderText("Search text...")
-        self._search.returnPressed.connect(self.on_find_next)
+        self._search.setPlaceholderText("Search text... (Enter=Next, Shift+Enter=Prev)")
         tb.addWidget(self._search)
+
+        # Enter / Shift+Enter で Next/Prev（検索欄にフォーカスしたまま操作できる）
+        self._search.returnPressed.connect(self.on_find_next)
+        self._search.installEventFilter(self)
 
         act_prev = QAction("Prev", self)
         act_prev.setShortcut(QKeySequence(Qt.Key.Key_F3 | Qt.KeyboardModifier.ShiftModifier))
@@ -74,6 +81,20 @@ class MainWindow(QMainWindow):
         act_zoomout.triggered.connect(lambda: self._view.zoom_by(1 / 1.1))
         tb.addAction(act_zoomout)
 
+        tb.addSeparator()
+
+        # 検索ステータス（常時表示）
+        self._lbl_status = QLabel("0/0", self)
+        self._lbl_status.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        self._lbl_status.setMinimumWidth(140)
+        tb.addWidget(self._lbl_status)
+
+        # Ctrl+F で検索欄へ（ブラウザっぽい）
+        act_focus_find = QAction("Find", self)
+        act_focus_find.setShortcut(QKeySequence.StandardKey.Find)
+        act_focus_find.triggered.connect(self._focus_search)
+        self.addAction(act_focus_find)
+
     def _build_menus(self) -> None:
         m_file = self.menuBar().addMenu("File")
 
@@ -95,12 +116,17 @@ class MainWindow(QMainWindow):
 
     def _refresh_recent_menu(self) -> None:
         self._recent_menu.clear()
-        for p in self._recent.list_paths():
+        paths = self._recent.list_paths()
+        for p in paths:
             act = QAction(p, self)
             act.triggered.connect(lambda _=False, s=p: self.open_pdf(Path(s)))
             self._recent_menu.addAction(act)
-        if not self._recent.list_paths():
+        if not paths:
             self._recent_menu.addAction("(empty)").setEnabled(False)
+
+    def _focus_search(self) -> None:
+        self._search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._search.selectAll()
 
     def open_pdf_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
@@ -118,18 +144,45 @@ class MainWindow(QMainWindow):
         self._recent.push(str(path))
         self._refresh_recent_menu()
 
+        # PDFを開いたら検索状態をリセット（表示更新）
+        self._update_search_status()
+
+    def _update_search_status(self) -> None:
+        st = self._view.get_search_status() if hasattr(self._view, "get_search_status") else None
+        if not st:
+            self._lbl_status.setText("0/0")
+            return
+        cur, total, page = st
+        self._lbl_status.setText(f"{cur}/{total} (page {page})")
+
+    def _notify_no_matches(self) -> None:
+        self.statusBar().showMessage("No matches", 1500)
+
     def on_find_next(self) -> None:
         q = self._search.text().strip()
         if not q:
             return
+
         ok = self._view.find_next(q)
         if not ok:
-            self.statusBar().showMessage("No more matches", 1500)
+            self._notify_no_matches()
+        self._update_search_status()
 
     def on_find_prev(self) -> None:
         q = self._search.text().strip()
         if not q:
             return
+
         ok = self._view.find_prev(q)
         if not ok:
-            self.statusBar().showMessage("No more matches", 1500)
+            self._notify_no_matches()
+        self._update_search_status()
+
+    # Shift+Enter を検索欄で拾って Prev にする
+    def eventFilter(self, obj, event):
+        if obj is self._search and event.type() == event.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    self.on_find_prev()
+                    return True
+        return super().eventFilter(obj, event)

@@ -1,11 +1,9 @@
 # src/pdf_viewer_core/ui/page_widget.py
 from __future__ import annotations
 
-from pathlib import Path
-
 import pypdfium2 as pdfium
 from PyQt6.QtCore import Qt, QRectF
-from PyQt6.QtGui import QImage, QPainter, QPixmap
+from PyQt6.QtGui import QImage, QPainter, QPixmap, QColor, QPen
 from PyQt6.QtWidgets import QLabel, QWidget, QVBoxLayout
 
 
@@ -26,6 +24,11 @@ class PageWidget(QWidget):
         self._pixmap: QPixmap | None = None
         self._page_w: float = 1.0
         self._page_h: float = 1.0
+
+        # 検索ヒットしたページの枠強調
+        self._active_match: bool = False
+
+        # PDF座標系のハイライト矩形（l,t,r,b）
         self._highlight_rects: list[tuple[float, float, float, float]] = []
 
         self._render()
@@ -40,6 +43,12 @@ class PageWidget(QWidget):
         self._highlight_rects = rects
         self._render_overlay()
 
+    def set_active_match(self, active: bool) -> None:
+        if self._active_match == active:
+            return
+        self._active_match = active
+        self._render_overlay()
+
     def _render(self) -> None:
         page = self._doc.get_page(self.page_index)
 
@@ -48,14 +57,13 @@ class PageWidget(QWidget):
         self._page_w = float(w_pt)
         self._page_h = float(h_pt)
 
-        # レンダリング倍率（ざっくり: zoom * 150dpi 相当）
-        # 後で DPI/品質は調整しやすいようにする
+        # レンダリング倍率（zoom * 150dpi相当のざっくり）
         scale = self._zoom * 2.0
 
         bitmap = page.render(scale=scale)
         pil = bitmap.to_pil()
 
-        # PIL -> QImage
+        # PIL -> QImage（RGBA）
         rgba = pil.convert("RGBA")
         data = rgba.tobytes("raw", "RGBA")
         qimg = QImage(data, rgba.width, rgba.height, QImage.Format.Format_RGBA8888)
@@ -70,17 +78,55 @@ class PageWidget(QWidget):
         pm = QPixmap(self._pixmap)  # copy
         painter = QPainter(pm)
 
-        # ハイライト描画（半透明）
-        painter.setOpacity(0.35)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(Qt.GlobalColor.yellow)
+        # ---- ヒットページの強調（青枠） ----
+        if self._active_match:
+            # 枠は強めに
+            pen = QPen(QColor(30, 110, 255, 230))
+            pen.setWidth(6)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(0, 0, pm.width() - 1, pm.height() - 1)
 
-        for (l, t, r, b) in self._highlight_rects:
-            rect = self._pdf_rect_to_image_rect(l, t, r, b, pm.width(), pm.height())
-            painter.drawRect(rect)
+        # ---- ハイライト描画（OneNote寄せ：塗り＋枠＋角丸） ----
+        if self._highlight_rects:
+            fill = QColor(255, 235, 120, 170)    # 透明度込み
+            border = QColor(180, 140, 40, 220)   # 輪郭
+
+            pen = QPen(border)
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.setBrush(fill)
+
+            for (l, t, r, b) in self._highlight_rects:
+                rect = self._pdf_rect_to_image_rect(l, t, r, b, pm.width(), pm.height())
+
+                # 最低保証の行高（小さすぎるbbox対策）
+                approx_line_h = pm.height() / 55.0
+
+                # 文字サイズ由来の高さ（こちらが主役）
+                h_char = max(1.0, rect.height())
+
+                # 実際に使う“帯の基準高さ”
+                band_h = max(h_char, approx_line_h * 0.55)
+
+                pad_x = 3
+                pad_y = band_h * 0.35
+
+                # 下寄り補正：帯高さに応じて上に持ち上げる
+                shift_up = band_h * 0.18
+
+                rect = rect.adjusted(-pad_x, -pad_y, +pad_x, +pad_y)
+                rect.translate(0.0, -shift_up)
+
+                painter.drawRoundedRect(rect, 5, 5)
+
+
+
+
+
+
 
         painter.end()
-
         self._label.setPixmap(pm)
 
     def _pdf_rect_to_image_rect(self, l: float, t: float, r: float, b: float, img_w: int, img_h: int) -> QRectF:
@@ -103,3 +149,21 @@ class PageWidget(QWidget):
         py1 = y1 * img_h
 
         return QRectF(px0, py0, max(1.0, px1 - px0), max(1.0, py1 - py0))
+
+    def pdf_y_to_local_y(self, y_pdf: float) -> float:
+        """
+        PDF座標(y) -> PageWidgetローカル座標(y) に変換する。
+        y_pdf は PDF座標系（ページ下原点でも上原点でもOK）
+        ここでは _pdf_rect_to_image_rect と同じ変換規約を使う。
+        """
+        if not self._pixmap:
+            return 0.0
+
+        img_h = float(self._pixmap.height())
+
+        # _pdf_rect_to_image_rect と同じ「上下反転」前提
+        y_norm = 1.0 - (y_pdf / self._page_h)
+        y_img = y_norm * img_h
+
+        # QLabel は PageWidget 内で上に配置されているので、そのまま返してOK
+        return y_img
